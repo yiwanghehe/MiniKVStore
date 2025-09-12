@@ -21,7 +21,7 @@ public class SkipList<K extends Comparable<K>, V> {
     /**
      * 跳表的最大层数
      */
-    private static final Integer MAX_LEVEL = 64;
+    private static final Integer MAX_LEVEL = 32;
 
     /**
      * 跳表的头节点
@@ -83,6 +83,10 @@ public class SkipList<K extends Comparable<K>, V> {
      */
     public Long getNodeCount() {
         return this.nodeCount.get();
+    }
+
+    public Node<K, V> getHeader() {
+        return this.header;
     }
 
     /**
@@ -283,8 +287,8 @@ public class SkipList<K extends Comparable<K>, V> {
     /**
      * 根据文件中的持久化字符串，获取 key 和 value，并将 key 和 value 封装到 Node 对象中
      *
-     * @param data 字符串
-     * @param keyDeserializer key反序列化器
+     * @param data              字符串
+     * @param keyDeserializer   key反序列化器
      * @param valueDeserializer value反序列化器
      * @return 返回该字符串对应的key和value 组成的 Node 实例，如果字符串非法，则返回 null
      */

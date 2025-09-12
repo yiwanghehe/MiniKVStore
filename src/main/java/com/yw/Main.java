@@ -1,69 +1,71 @@
 package com.yw;
 
-import com.yw.skipList.SkipList;
+import com.yw.store.LSMStore;
 
+import java.io.IOException;
 import java.util.Scanner;
 
 public class Main {
     public static void main(String[] args) {
-        SkipList<String, String> skipList = new SkipList<>();
-        Scanner scanner = new Scanner(System.in);
+        LSMStore<String, String> store = null;
+        try {
+            // 启动LSM存储引擎
+            store = new LSMStore<>();
+            System.out.println("MiniKV 存储引擎启动成功！");
+            System.out.println("支持的命令: put key value, get key, exit");
 
-        label:
-        while (true) {
-            String command = scanner.nextLine();
-            String[] commandList = command.split(" ");
-            switch (commandList[0]) {
-                case "insert": {
-                    boolean b = skipList.insert(commandList[1], commandList[2]);
-                    if (b) {
-                        System.out.println("Key: " + commandList[1] + " Value: " + commandList[2] + " 插入成功!");
-                    } else {
-                        System.out.println("Key: " + commandList[1] + " Value: " + commandList[2] + " 插入失败");
-                    }
-                    break;
+            Scanner scanner = new Scanner(System.in);
+
+            // 主命令循环
+            while (true) {
+                System.out.print("> ");
+                String commandLine = scanner.nextLine();
+                if (commandLine == null || commandLine.trim().isEmpty()) {
+                    continue;
                 }
-                case "delete": {
-                    boolean b = skipList.delete(commandList[1]);
-                    if (b) {
-                        System.out.println("Key: " + commandList[1] + " 被删除!");
-                    } else {
-                        System.out.println("不存在此key: " + commandList[1]);
-                    }
-                    break;
+
+                String[] parts = commandLine.trim().split("\\s+", 3);
+                String command = parts[0].toLowerCase();
+
+                switch (command) {
+                    case "put":
+                        if (parts.length == 3) {
+                            store.put(parts[1], parts[2]);
+                            System.out.println("OK");
+                        } else {
+                            System.out.println("错误: put 命令需要 key 和 value. 用法: put <key> <value>");
+                        }
+                        break;
+                    case "get":
+                        if (parts.length == 2) {
+                            String value = store.get(parts[1]);
+                            if (value != null) {
+                                System.out.println(value);
+                            } else {
+                                System.out.println("(nil)"); // 表示未找到
+                            }
+                        } else {
+                            System.out.println("错误: get 命令需要 key. 用法: get <key>");
+                        }
+                        break;
+                    case "exit":
+                        return; // 触发finally块中的store.close()
+                    default:
+                        System.out.println("未知命令: " + command);
+                        break;
                 }
-                case "search": {
-                    boolean b = skipList.search(commandList[1]);
-                    if (b) {
-                        System.out.println("Key: " + commandList[1] + " 被找到!");
-                    } else {
-                        System.out.println("Key: " + commandList[1] + " 不存在!");
-                    }
-                    break;
+            }
+        } catch (IOException e) {
+            System.err.println("存储引擎启动或操作失败: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            if (store != null) {
+                try {
+                    // 确保引擎被优雅关闭
+                    store.close();
+                } catch (InterruptedException | IOException e) {
+                    System.err.println("关闭存储引擎时出错: " + e.getMessage());
                 }
-                case "get":
-                    if (!skipList.search(commandList[1])) {
-                        System.out.println("Key: " + commandList[1] + " 不存在!");
-                    }
-                    String value = skipList.get(commandList[1]);
-                    if (value != null) {
-                        System.out.println("Key: " + commandList[1] + " " + "Value: " + value);
-                    }
-                    break;
-                case "dump":
-                    skipList.dump();
-                    System.out.println("已保存.");
-                    break;
-                case "load":
-                    skipList.load(String::new, String::new);
-                    break;
-                case "exit":
-                    break label;
-                default:
-                    System.out.println("********skiplist*********");
-                    skipList.display();
-                    System.out.println("*************************");
-                    break;
             }
         }
     }
