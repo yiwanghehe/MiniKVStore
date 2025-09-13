@@ -39,9 +39,9 @@ public class SkipList<K extends Comparable<K>, V> {
     private final AtomicLong nodeCount;
 
     /**
-     * 持久化文件保存位置
+     * 估算内存大小
      */
-    private static final String STORE_LOCATION = "./store";
+    private final AtomicLong approximateSize;
 
     /**
      * 构造方法
@@ -50,6 +50,7 @@ public class SkipList<K extends Comparable<K>, V> {
         this.header = new Node<>(null, null, MAX_LEVEL);
         this.skipListLevel = new AtomicInteger(0);
         this.nodeCount = new AtomicLong(0L);
+        this.approximateSize = new AtomicLong(0L);
     }
 
     /**
@@ -72,10 +73,10 @@ public class SkipList<K extends Comparable<K>, V> {
     public Integer generateLevel() {
         int level = 1;
         // 直接使用，无需创建random实例，每个线程有自己的生成器，无竞争，性能最佳
-        while (ThreadLocalRandom.current().nextInt(2) == 1) {
+        while (ThreadLocalRandom.current().nextInt(2) == 1 && level < MAX_LEVEL) {
             level++;
         }
-        return Math.min(level, MAX_LEVEL);
+        return level;
     }
 
     /**
@@ -85,8 +86,18 @@ public class SkipList<K extends Comparable<K>, V> {
         return this.nodeCount.get();
     }
 
+    /**
+     * @return 返回头节点
+     */
     public Node<K, V> getHeader() {
         return this.header;
+    }
+
+    /**
+     * @return 返回估算大小
+     */
+    public long getApproximateSize() {
+        return this.approximateSize.get();
     }
 
     /**
@@ -115,7 +126,13 @@ public class SkipList<K extends Comparable<K>, V> {
             current = current.getForwards().get(0);
 
             if (current != null && current.getKey().compareTo(key) == 0) {
+                V oldValue = current.getValue();
                 current.setValue(value);
+
+                // 更新大小
+                if (oldValue instanceof String && value instanceof String) {
+                    approximateSize.addAndGet(((String) value).length() - ((String) oldValue).length());
+                }
                 return true;
             }
 
@@ -136,6 +153,9 @@ public class SkipList<K extends Comparable<K>, V> {
                     update.get(i).getForwards().set(i, newNode);
                 }
                 this.nodeCount.incrementAndGet(); // 使用原子自增
+                if (key instanceof String && value instanceof String) {
+                    approximateSize.addAndGet(((String) key).length() + ((String) value).length());
+                }
                 return true;
             }
             return false;
@@ -146,48 +166,48 @@ public class SkipList<K extends Comparable<K>, V> {
 
     }
 
-    /**
-     * 根据 key 删除 SkipList 中的 Node
-     *
-     * @param key 需要删除的 Node 的 key
-     * @return 删除成功返回 true，失败返回 false
-     */
-    public boolean delete(K key) {
-        rwLock.writeLock().lock();
-        try {
-            Node<K, V> current = this.header;
-
-            ArrayList<Node<K, V>> update = new ArrayList<>(Collections.nCopies(MAX_LEVEL + 1, null));
-
-            int currentLevel = this.skipListLevel.get();
-            for (int i = currentLevel; i >= 0; i--) {
-                while (current.getForwards().get(i) != null && current.getForwards().get(i).getKey().compareTo(key) < 0) {
-                    current = current.getForwards().get(i);
-                }
-                update.set(i, current);
-            }
-
-            current = current.getForwards().get(0);
-
-            if (current != null && current.getKey().compareTo(key) == 0) {
-                for (int i = 0; i <= current.getLevel(); i++) {
-                    update.get(i).getForwards().set(i, current.getForwards().get(i));
-                }
-
-                while (this.skipListLevel.get() > 0 && this.header.getForwards().get(this.skipListLevel.get()) == null) {
-                    this.skipListLevel.decrementAndGet(); // 使用原子自减
-                }
-
-                this.nodeCount.decrementAndGet(); // 使用原子自减
-                return true;
-            }
-
-            return false;
-        } finally {
-            rwLock.writeLock().unlock();
-        }
-
-    }
+//    /**
+//     * 根据 key 删除 SkipList 中的 Node
+//     *
+//     * @param key 需要删除的 Node 的 key
+//     * @return 删除成功返回 true，失败返回 false
+//     */
+//    public boolean delete(K key) {
+//        rwLock.writeLock().lock();
+//        try {
+//            Node<K, V> current = this.header;
+//
+//            ArrayList<Node<K, V>> update = new ArrayList<>(Collections.nCopies(MAX_LEVEL + 1, null));
+//
+//            int currentLevel = this.skipListLevel.get();
+//            for (int i = currentLevel; i >= 0; i--) {
+//                while (current.getForwards().get(i) != null && current.getForwards().get(i).getKey().compareTo(key) < 0) {
+//                    current = current.getForwards().get(i);
+//                }
+//                update.set(i, current);
+//            }
+//
+//            current = current.getForwards().get(0);
+//
+//            if (current != null && current.getKey().compareTo(key) == 0) {
+//                for (int i = 0; i <= current.getLevel(); i++) {
+//                    update.get(i).getForwards().set(i, current.getForwards().get(i));
+//                }
+//
+//                while (this.skipListLevel.get() > 0 && this.header.getForwards().get(this.skipListLevel.get()) == null) {
+//                    this.skipListLevel.decrementAndGet(); // 使用原子自减
+//                }
+//
+//                this.nodeCount.decrementAndGet(); // 使用原子自减
+//                return true;
+//            }
+//
+//            return false;
+//        } finally {
+//            rwLock.writeLock().unlock();
+//        }
+//
+//    }
 
     /**
      * 搜索跳表中是否存在键为 key 的键值对
@@ -226,8 +246,8 @@ public class SkipList<K extends Comparable<K>, V> {
         rwLock.readLock().lock();
         try {
             Node<K, V> current = this.header;
-
             int currentLevel = this.skipListLevel.get();
+
             for (int i = currentLevel; i >= 0; i--) {
                 while (current.getForwards().get(i) != null && current.getForwards().get(i).getKey().compareTo(key) < 0) {
                     current = current.getForwards().get(i);
@@ -246,91 +266,91 @@ public class SkipList<K extends Comparable<K>, V> {
 
     }
 
-    /**
-     * 持久化跳表内的数据
-     */
-    public void dump() {
-        rwLock.readLock().lock();
-        try (BufferedWriter bufferedWriter = new BufferedWriter(new FileWriter(STORE_LOCATION))) {
-            Node<K, V> current = this.header.getForwards().get(0);
-            while (current != null) {
-                String data = current.getKey() + ":" + current.getValue() + ";";
-                bufferedWriter.write(data);
-                bufferedWriter.newLine();
-                current = current.getForwards().get(0);
-            }
-        } catch (IOException e) {
-            throw new RuntimeException("持久化失败");
-        } finally {
-            rwLock.readLock().unlock();
-        }
-    }
+//    /**
+//     * 持久化跳表内的数据
+//     */
+//    public void dump() {
+//        rwLock.readLock().lock();
+//        try (BufferedWriter bufferedWriter = new BufferedWriter(new FileWriter(STORE_LOCATION))) {
+//            Node<K, V> current = this.header.getForwards().get(0);
+//            while (current != null) {
+//                String data = current.getKey() + ":" + current.getValue() + ";";
+//                bufferedWriter.write(data);
+//                bufferedWriter.newLine();
+//                current = current.getForwards().get(0);
+//            }
+//        } catch (IOException e) {
+//            throw new RuntimeException("持久化失败");
+//        } finally {
+//            rwLock.readLock().unlock();
+//        }
+//    }
 
-    /**
-     * 从文本文件中读取数据
-     */
-    public void load(Function<String, K> keyDeserializer, Function<String, V> valueDeserializer) {
-        try (BufferedReader bufferedReader = new BufferedReader((new FileReader(STORE_LOCATION)))) {
-            String data;
-            while ((data = bufferedReader.readLine()) != null) {
-                Node<K, V> node = getKVFromString(data, keyDeserializer, valueDeserializer);
-                if (node != null) {
-                    insert(node.getKey(), node.getValue());
-                }
-            }
-            System.out.println("加载成功:" + this.nodeCount.get() + "个数据");
-        } catch (IOException e) {
-            throw new RuntimeException("加载失败");
-        }
-    }
+//    /**
+//     * 从文本文件中读取数据
+//     */
+//    public void load(Function<String, K> keyDeserializer, Function<String, V> valueDeserializer) {
+//        try (BufferedReader bufferedReader = new BufferedReader((new FileReader(STORE_LOCATION)))) {
+//            String data;
+//            while ((data = bufferedReader.readLine()) != null) {
+//                Node<K, V> node = getKVFromString(data, keyDeserializer, valueDeserializer);
+//                if (node != null) {
+//                    insert(node.getKey(), node.getValue());
+//                }
+//            }
+//            System.out.println("加载成功:" + this.nodeCount.get() + "个数据");
+//        } catch (IOException e) {
+//            throw new RuntimeException("加载失败");
+//        }
+//    }
 
-    /**
-     * 根据文件中的持久化字符串，获取 key 和 value，并将 key 和 value 封装到 Node 对象中
-     *
-     * @param data              字符串
-     * @param keyDeserializer   key反序列化器
-     * @param valueDeserializer value反序列化器
-     * @return 返回该字符串对应的key和value 组成的 Node 实例，如果字符串非法，则返回 null
-     */
-    public Node<K, V> getKVFromString(String data, Function<String, K> keyDeserializer, Function<String, V> valueDeserializer) {
-        if (!isValidDataString(data)) return null;
-        String keyStr = data.substring(0, data.indexOf(":"));
-        String valueStr = data.substring(data.indexOf(":") + 1, data.length() - 1);
-        K key = keyDeserializer.apply(keyStr);
-        V value = valueDeserializer.apply(valueStr);
-        return new Node<>(key, value, 0);
-    }
-
-    /**
-     * 判断读取的data字符串是否合法
-     *
-     * @param data 字符串
-     * @return 合法返回 true，非法返回 false
-     */
-    public boolean isValidDataString(String data) {
-        if (data == null || data.isEmpty()) return false;
-        return data.contains(":");
-    }
-
-    /**
-     * 打印跳表的结构
-     */
-    public void display() {
-        rwLock.readLock().lock();
-        try {
-            int currentLevel = this.skipListLevel.get();
-            for (int i = currentLevel; i >= 0; i--) {
-                Node<K, V> current = this.header.getForwards().get(i);
-                System.out.print("Level " + i + ": ");
-                while (current != null) {
-                    System.out.print(current.getKey() + ":" + current.getValue() + ";");
-                    current = current.getForwards().get(i);
-                }
-                System.out.println();
-            }
-        } finally {
-            rwLock.readLock().unlock();
-        }
-    }
+//    /**
+//     * 根据文件中的持久化字符串，获取 key 和 value，并将 key 和 value 封装到 Node 对象中
+//     *
+//     * @param data              字符串
+//     * @param keyDeserializer   key反序列化器
+//     * @param valueDeserializer value反序列化器
+//     * @return 返回该字符串对应的key和value 组成的 Node 实例，如果字符串非法，则返回 null
+//     */
+//    public Node<K, V> getKVFromString(String data, Function<String, K> keyDeserializer, Function<String, V> valueDeserializer) {
+//        if (!isValidDataString(data)) return null;
+//        String keyStr = data.substring(0, data.indexOf(":"));
+//        String valueStr = data.substring(data.indexOf(":") + 1, data.length() - 1);
+//        K key = keyDeserializer.apply(keyStr);
+//        V value = valueDeserializer.apply(valueStr);
+//        return new Node<>(key, value, 0);
+//    }
+//
+//    /**
+//     * 判断读取的data字符串是否合法
+//     *
+//     * @param data 字符串
+//     * @return 合法返回 true，非法返回 false
+//     */
+//    public boolean isValidDataString(String data) {
+//        if (data == null || data.isEmpty()) return false;
+//        return data.contains(":");
+//    }
+//
+//    /**
+//     * 打印跳表的结构
+//     */
+//    public void display() {
+//        rwLock.readLock().lock();
+//        try {
+//            int currentLevel = this.skipListLevel.get();
+//            for (int i = currentLevel; i >= 0; i--) {
+//                Node<K, V> current = this.header.getForwards().get(i);
+//                System.out.print("Level " + i + ": ");
+//                while (current != null) {
+//                    System.out.print(current.getKey() + ":" + current.getValue() + ";");
+//                    current = current.getForwards().get(i);
+//                }
+//                System.out.println();
+//            }
+//        } finally {
+//            rwLock.readLock().unlock();
+//        }
+//    }
 }
 

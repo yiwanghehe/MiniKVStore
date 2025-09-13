@@ -2,6 +2,7 @@ package com.yw.store;
 
 import com.yw.node.Node;
 import com.yw.skipList.SkipList;
+import org.checkerframework.checker.units.qual.K;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -14,27 +15,28 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 
 /**
- * LSM-Tree 架构的核心存储引擎。
- * 它负责协调 WAL、MemTable 和 SSTable，对外提供统一的 put/get/delete 接口。
- *
- * @param <K> 键类型
- * @param <V> 值类型
+ * LSM-Tree 架构的核心存储引擎 (V2)。
+ * 协调 WAL, MemTable, SSTableManager, 和 CompactionManager。
  */
-public class LSMStore<K extends Comparable<K>, V> {
+public class LSMStore implements AutoCloseable {
     // --- 核心组件 ---
-    private volatile SkipList<K, V> activeMemTable; // 当前活跃的可写内存表
-    private final WALManager<K, V> walManager; // 预写日志管理器
-    private final ConcurrentLinkedQueue<SkipList<K, V>> immutableMemTables; // 只读的、等待刷盘的内存表队列
+    private volatile SkipList<String, String> activeMemTable; // 当前活跃的可写内存表
+    private final ConcurrentLinkedQueue<SkipList<String, String>> immutableMemTables; // 只读的、等待刷盘的内存表队列
+    private final WALManager<String, String> walManager; // 预写日志管理器
+    private final SSTableManager sstManager; // 管理所有SSTable的生命周期、元数据和查询。
+    private final CompactionManager compactionManager; // 后台线程，负责执行SSTable的合并操作。
 
     // --- 配置与状态 ---
+    public static final String TOMBSTONE = "!!__TOMBSTONE__!!"; // 删除标记(墓碑)
     private static final String DATA_DIR = "./data"; // 数据存储目录
-    private static final String SSTABLE_DIR = DATA_DIR + "/sst";
-    private static final Long MEMTABLE_THRESHOLD = 10000L; // MemTable切换阈值，简化为条目数
-    private final ReentrantLock memtableSwitchLock = new ReentrantLock(); // MemTable切换锁
+    private static final long MEMTABLE_THRESHOLD = 4 * 1024 * 1024; // MemTable切换阈值 (4MB)
+    private final ReadWriteLock memtableSwitchLock = new ReentrantReadWriteLock(); // MemTable切换锁
     private volatile boolean shuttingDown = false; // 关闭的状态标志
 
     // --- 后台任务 ---
@@ -46,15 +48,14 @@ public class LSMStore<K extends Comparable<K>, V> {
      * @throws IOException 初始化过程中发生IO错误
      */
     public LSMStore() throws IOException {
-        // 确保数据目录存在
-        Files.createDirectories(Paths.get(SSTABLE_DIR));
-
         this.activeMemTable = new SkipList<>();
-        this.walManager = new WALManager<>(DATA_DIR);
         this.immutableMemTables = new ConcurrentLinkedQueue<>();
+        this.walManager = new WALManager<>(DATA_DIR);
+        this.sstManager = new SSTableManager(DATA_DIR);
 
         // 恢复未完成刷盘的MemTable
         recoverFromWAL();
+        sstManager.loadSSTables(); // 加载现有SSTable的元数据
 
         // 启动后台刷盘线程
         this.flushExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -63,6 +64,10 @@ public class LSMStore<K extends Comparable<K>, V> {
             return t;
         });
         this.flushExecutor.submit(this::flushTask);
+
+        // 后台合并线程
+        this.compactionManager = new CompactionManager(sstManager);
+        this.compactionManager.start();
     }
 
     /**
@@ -72,43 +77,58 @@ public class LSMStore<K extends Comparable<K>, V> {
      * @param value 值
      * @throws IOException WAL写入失败
      */
-    public void put(K key, V value) throws IOException {
-        if (shuttingDown) {
-            throw new IllegalStateException("存储引擎正在关闭，无法接受新的写入。");
+    public void put(String key, String value) throws IOException {
+        if (shuttingDown) throw new IllegalStateException("存储引擎正在关闭，无法接受新的写入。");
+        if (key == null || value == null) throw new IllegalArgumentException("Key和Value不能为空");
+
+        memtableSwitchLock.readLock().lock();
+        try {
+            // 先写入WAL日志，保证数据不丢失
+            walManager.logPut(key, value);
+            // 写入MemTable
+            activeMemTable.insert(key, value);
+            if (activeMemTable.getApproximateSize() >= MEMTABLE_THRESHOLD) {
+                // 升级读锁为写锁前，必须先释放读锁
+                memtableSwitchLock.readLock().unlock();
+                memtableSwitchLock.writeLock().lock();
+                try {
+                    // 双重检查，防止在等待写锁时其他线程已经完成了切换
+                    // 检查是否切换MemTable
+                    if (activeMemTable.getApproximateSize() >= MEMTABLE_THRESHOLD) {
+                        switchMemTable();
+                    }
+                } finally {
+                    // 降级写锁为读锁
+                    memtableSwitchLock.readLock().lock();
+                    memtableSwitchLock.writeLock().unlock();
+                }
+            }
+        } finally {
+            memtableSwitchLock.readLock().unlock();
         }
+    }
 
-        // 先写入WAL日志，保证数据不丢失
-        walManager.logPut(key, value);
+    public void delete(String key) throws IOException {
+        if (shuttingDown) throw new IllegalStateException("引擎正在关闭");
+        if (key == null) throw new IllegalArgumentException("Key不能为空");
 
-        // 写入MemTable
-        activeMemTable.insert(key, value);
-
-        // 检查是否切换MemTable
-        if (activeMemTable.getNodeCount() >= MEMTABLE_THRESHOLD) {
-            switchMemTable();
-        }
+        put(key, TOMBSTONE);
     }
 
     /**
      * 切换MemTable，将当前活跃的MemTable变为不可变，并创建一个新的空MemTable。
      */
-    private void switchMemTable() {
-        memtableSwitchLock.lock();
-        try {
-            // 防止并发切换
-            if (activeMemTable.getNodeCount() == 0) return;
+    private void switchMemTable() throws IOException {
+        // 这个方法必须在持有写锁的情况下被调用
 
-            // 将当前的MemTable放入不可变队列，等待刷盘
-            immutableMemTables.add(activeMemTable);
-            // 新初始化一个MemTable
-            activeMemTable = new SkipList<>();
-            // 轮转日志
-            walManager.rotateLog();
-        } catch (IOException e) {
-            System.err.println("切换WAL日志失败: " + e.getMessage());
-        } finally {
-            memtableSwitchLock.unlock();
-        }
+        // 防止并发切换
+        if (activeMemTable.getNodeCount() == 0) return;
+        // 将当前的MemTable放入不可变队列，等待刷盘
+        immutableMemTables.add(activeMemTable);
+        // 新初始化一个MemTable
+        activeMemTable = new SkipList<>();
+        // 轮转日志
+        walManager.rotateLog();
     }
 
     /**
@@ -118,38 +138,29 @@ public class LSMStore<K extends Comparable<K>, V> {
      * @return 值，如果不存在则返回null
      * @throws IOException 读取SSTable失败
      */
-    public V get(K key) throws IOException {
-        V value;
+    public String get(String key) throws IOException {
+        if (key == null) return null;
+
+        String value;
 
         // 先从活跃的MemTable中查找
-        value = activeMemTable.get(key);
-        if (value != null) return value;
+        memtableSwitchLock.readLock().lock();
+        try {
+            value = activeMemTable.get(key);
+        } finally {
+            memtableSwitchLock.readLock().unlock();
+        }
+        if (value != null) return value.equals(TOMBSTONE) ? null : value;
 
         // 再从不可变的immutableMemTableQueue中查找(从新到旧)
-        for (SkipList<K, V> memTable : immutableMemTables) {
+        for (SkipList<String, String> memTable : immutableMemTables) {
             value = memTable.get(key);
-            if (value != null) return value;
+            if (value != null) return value.equals(TOMBSTONE) ? null : value;
         }
 
-        List<Path> sstFiles = Files.list(Paths.get(SSTABLE_DIR))
-                .filter(p -> p.toString().endsWith(".sst"))
-                .sorted(Comparator.reverseOrder()) // 按文件名倒序，实现从新到旧查找
-                .collect(Collectors.toList());
-
-        for (Path sstFile : sstFiles) {
-            // (简化实现) 逐行扫描文件查找
-            // 生产环境会使用SSTable的索引块来加速查找
-            List<String> lines = Files.readAllLines(sstFile);
-            for (String line : lines) {
-                String[] parts = line.split(":", 2);
-                if (parts[0].equals(key.toString())) {
-                    // 假设Value是String类型，这里需要更通用的反序列化
-                    return (V) parts[1].substring(0, parts[1].length() - 1);
-                }
-            }
-        }
-
-        return null;
+        // 从SSTable中查找
+        value = sstManager.get(key);
+        return (value != null && value.equals(TOMBSTONE)) ? null : value;
     }
 
     /**
@@ -157,10 +168,10 @@ public class LSMStore<K extends Comparable<K>, V> {
      */
     private void flushTask() {
         while (!shuttingDown || !immutableMemTables.isEmpty()) {
-            SkipList<K, V> memTableToFlush = immutableMemTables.poll();
+            SkipList<String, String> memTableToFlush = immutableMemTables.poll();
             if (memTableToFlush != null) {
                 try {
-                    flushMemTableToSSTable(memTableToFlush);
+                    sstManager.flushMemTableToSSTable(memTableToFlush);
                 } catch (IOException e) {
                     System.err.println("刷盘失败: " + e.getMessage());
                     // 实际应用中需要有重试或错误处理机制
@@ -181,36 +192,10 @@ public class LSMStore<K extends Comparable<K>, V> {
     }
 
     /**
-     * 将一个MemTable的内容写入一个新的SSTable文件。
-     *
-     * @param memTable 要刷盘的MemTable
-     * @throws IOException 写入失败
-     */
-    private void flushMemTableToSSTable(SkipList<K, V> memTable) throws IOException {
-        long timestamp = System.currentTimeMillis();
-        String sstFileName = timestamp + ".sst";
-        Path sstFilePath = Paths.get(SSTABLE_DIR, sstFileName);
-
-        System.out.println("开始刷盘: " + memTable.getNodeCount() + " 条记录到 " + sstFileName);
-
-        try (BufferedWriter writer = Files.newBufferedWriter(sstFilePath)) {
-            Node<K, V> current = memTable.getHeader().getForwards().get(0);
-            while (current != null) {
-                writer.write(current.getKey() + ":" + current.getValue() + ";");
-                writer.newLine();
-                current = current.getForwards().get(0);
-            }
-        }
-        System.out.println("刷盘完成: " + sstFileName);
-
-    }
-
-    /**
      * 从WAL日志中恢复数据。在引擎启动时调用。
      */
     private void recoverFromWAL() throws IOException {
         walManager.recover(activeMemTable);
-        System.out.println("从WAL恢复了 " + activeMemTable.getNodeCount() + " 条记录。");
     }
 
     /**
@@ -222,14 +207,18 @@ public class LSMStore<K extends Comparable<K>, V> {
         // 设置关闭标志，并拒绝新的写入
         shuttingDown = true;
 
-        memtableSwitchLock.lock();
+        compactionManager.shutdown();
+
+        // 切换最后的activeMemTable
+        memtableSwitchLock.writeLock().lock();
         try {
             // 将最后的 activeMemTable(如果非空)也加入待刷盘队列
             if (activeMemTable.getNodeCount() > 0) {
                 immutableMemTables.add(activeMemTable);
+                activeMemTable = new SkipList<>();
             }
         } finally {
-            memtableSwitchLock.unlock();
+            memtableSwitchLock.writeLock().unlock();
         }
 
         // 停止接受新任务，并等待现有任务刷盘完成

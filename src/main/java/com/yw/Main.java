@@ -7,12 +7,12 @@ import java.util.Scanner;
 
 public class Main {
     public static void main(String[] args) {
-        LSMStore<String, String> store = null;
+        LSMStore store = null;
         try {
             // 启动LSM存储引擎
-            store = new LSMStore<>();
+            store = new LSMStore();
             System.out.println("MiniKV 存储引擎启动成功！");
-            System.out.println("支持的命令: put key value, get key, exit");
+            System.out.println("支持的命令: put key value, get key, delete key, exit");
 
             Scanner scanner = new Scanner(System.in);
 
@@ -48,6 +48,14 @@ public class Main {
                             System.out.println("错误: get 命令需要 key. 用法: get <key>");
                         }
                         break;
+                    case "delete":
+                        if (parts.length == 2) {
+                            store.delete(parts[1]);
+                            System.out.println("OK");
+                        } else {
+                            System.out.println("错误: delete 命令需要 key. 用法: delete <key>");
+                        }
+                        break;
                     case "exit":
                         return; // 触发finally块中的store.close()
                     default:
@@ -61,7 +69,7 @@ public class Main {
         } finally {
             if (store != null) {
                 try {
-                    // 确保引擎被优雅关闭
+                    // 确保引擎被关闭
                     store.close();
                 } catch (InterruptedException | IOException e) {
                     System.err.println("关闭存储引擎时出错: " + e.getMessage());

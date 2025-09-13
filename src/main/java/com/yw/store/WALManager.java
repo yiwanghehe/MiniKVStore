@@ -24,7 +24,9 @@ public class WALManager<K extends Comparable<K>, V> {
     private BufferedWriter writer;
 
     public WALManager(String dataDir) throws IOException {
-        this.walFilePath = Paths.get(dataDir, WAL_FILE_NAME);
+        Path dataPath = Paths.get(dataDir);
+        Files.createDirectories(dataPath);
+        this.walFilePath = dataPath.resolve(WAL_FILE_NAME);
         this.writer = Files.newBufferedWriter(walFilePath, StandardCharsets.UTF_8,
                 StandardOpenOption.CREATE, StandardOpenOption.APPEND);
     }
@@ -37,7 +39,7 @@ public class WALManager<K extends Comparable<K>, V> {
      * @throws IOException 写入失败
      */
     public synchronized void logPut(K key, V value) throws IOException {
-        // 简化格式: "PUT,key,value"
+        // "PUT,key,value"
         this.writer.write("PUT," + key.toString() + "," + value.toString());
         this.writer.newLine();
         this.writer.flush(); // 强制刷盘，确保数据持久化
@@ -46,7 +48,7 @@ public class WALManager<K extends Comparable<K>, V> {
     /**
      * 关闭日志写入器。
      */
-    public void close() throws IOException {
+    public synchronized void close() throws IOException {
         if (this.writer != null) {
             this.writer.close();
             System.out.println("WAL已关闭");
@@ -61,10 +63,10 @@ public class WALManager<K extends Comparable<K>, V> {
         this.close();
         // 将旧日志文件重命名为带时间戳的归档文件
         if (Files.exists(walFilePath)) {
-            Path archivedPath = Paths.get(walFilePath.toString() + "." + System.currentTimeMillis());
+            Path archivedPath = walFilePath.resolveSibling(walFilePath.getFileName().toString() + "." + System.currentTimeMillis());
             Files.move(walFilePath, archivedPath);
+            // 在生产系统中，这些归档的WAL会在对应的MemTable成功刷盘后被删除
         }
-        // 创建新的WAL文件
         this.writer = Files.newBufferedWriter(walFilePath, StandardCharsets.UTF_8,
                 StandardOpenOption.CREATE, StandardOpenOption.APPEND);
     }
@@ -90,5 +92,6 @@ public class WALManager<K extends Comparable<K>, V> {
                 memTable.insert(key, value);
             }
         }
+        System.out.println("从WAL恢复了 " + memTable.getNodeCount() + " 条记录。");
     }
 }
