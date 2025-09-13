@@ -206,27 +206,28 @@ public class SSTableManager {
 //        if (mergedData.getNodeCount() > 0) {
 //            SSTableWriter.write(mergedData, outputPath.toString());
 //        }
+        List<SSTableIterator> iterators = new ArrayList<>();
         PriorityQueue<CompactionManager.IteratorEntry> pq = new PriorityQueue<>();
-        // 使用try-with-resources确保迭代器被关闭
         try {
             for (SSTableReader reader : readers) {
                 SSTableIterator it = reader.iterator();
+                iterators.add(it); // 跟踪所有迭代器以便最后关闭
                 if (it.hasNext()) {
                     pq.add(new CompactionManager.IteratorEntry(it.next(), it));
-                } else {
-                    it.close(); // 空文件也关闭迭代器
                 }
             }
 
             SkipList<String, String> mergedData = new SkipList<>();
             String lastKey = null;
 
-            while(!pq.isEmpty()) {
+            while (!pq.isEmpty()) {
                 CompactionManager.IteratorEntry entry = pq.poll();
                 Node<String, String> node = entry.node;
 
-                if (!node.getKey().equals(lastKey)) {
-                    if(!node.getValue().equals(LSMStore.TOMBSTONE)) {
+                // 跳过重复的、旧版本的key
+                if (lastKey == null || !node.getKey().equals(lastKey)) {
+                    // 如果不是删除标记（墓碑），就加入结果集
+                    if (!node.getValue().equals(LSMStore.TOMBSTONE)) {
                         mergedData.insert(node.getKey(), node.getValue());
                     }
                     lastKey = node.getKey();
@@ -242,9 +243,13 @@ public class SSTableManager {
                 SSTableWriter.write(mergedData, outputPath.toString());
             }
         } finally {
-            // 确保所有迭代器都被关闭
-            while(!pq.isEmpty()){
-                pq.poll().iterator.close();
+            // 确保所有打开的迭代器都被关闭，防止文件句柄泄露
+            for (SSTableIterator it : iterators) {
+                try {
+                    it.close();
+                } catch (IOException e) {
+                    System.err.println("Compaction: 关闭迭代器失败: " + e.getMessage());
+                }
             }
         }
     }

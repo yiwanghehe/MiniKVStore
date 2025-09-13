@@ -23,10 +23,7 @@ public class SSTableIterator {
             this.fileEndOffset = 0; // 没有数据，迭代范围为0
         } else {
             // 如果不为空，迭代的终点就是索引块的起始位置。
-            // 这个位置信息存储在文件的Footer中（倒数第24个字节开始）。
-            long fileLength = reader.raf.length();
-            raf.seek(fileLength - 24);
-            this.fileEndOffset = raf.readLong(); // 读取索引块的偏移量
+            this.fileEndOffset = reader.getIndexOffset();
         }
     }
 

@@ -173,7 +173,7 @@ public class ComprehensiveTest {
     private static void testConcurrency() throws Exception {
         System.out.println("\n--- [测试 5/5] 并发读写 ---");
         final int numThreads = 10;
-        final int opsPerThread = 5000;
+        final int opsPerThread = 50000;
         final CountDownLatch latch = new CountDownLatch(numThreads);
         final AtomicInteger errors = new AtomicInteger(0);
         final LSMStore store = new LSMStore();
