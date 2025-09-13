@@ -190,15 +190,14 @@ public class LSMStore implements AutoCloseable {
 
     /**
      * 关闭存储引擎，确保所有数据都已持久化。
+     * (V2: 增加了对SSTableManager的关闭调用)
      */
+    @Override
     public void close() throws InterruptedException, IOException {
         System.out.println("正在关闭存储引擎...");
-
         // 设置关闭标志，并拒绝新的写入
         shuttingDown = true;
-
         compactionManager.shutdown();
-
         // 切换最后的activeMemTable
         memtableSwitchLock.writeLock().lock();
         try {
@@ -216,6 +215,9 @@ public class LSMStore implements AutoCloseable {
         if (!flushExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
             System.err.println("后台刷盘任务在10秒内未能完成！");
         }
+
+        // 在关闭WAL之前，先关闭所有SSTable文件句柄
+        sstManager.close();
 
         // 所有内存数据都刷盘后或超时后，才关闭WAL
         walManager.close();

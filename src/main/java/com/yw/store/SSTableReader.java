@@ -15,8 +15,9 @@ import java.util.List;
 
 /**
  * 负责读取SSTable文件。
+ * (V2: 实现AutoCloseable接口，确保文件句柄能被正确关闭)
  */
-public class SSTableReader {
+public class SSTableReader implements AutoCloseable{
     private final String filePath;
     final RandomAccessFile raf;
     final List<IndexEntry> indexs;
@@ -29,6 +30,14 @@ public class SSTableReader {
         this.raf = new RandomAccessFile(filePath, "r");
         this.indexs = new ArrayList<>();
 
+        // 文件长度不足以容纳Footer，说明是空文件或非法文件
+        if (raf.length() < 24) {
+            this.firstKey = null;
+            this.lastKey = null;
+            this.bloomFilter = null; // 或者一个空的布隆过滤器
+            return;
+        }
+
         // 读取Footer
         long fileLength = raf.length();
         raf.seek(fileLength - 24); // Footer size = 8B index_offset, 8B bloom_offset, 8B magic_number
@@ -36,6 +45,7 @@ public class SSTableReader {
         long bloomOffset = raf.readLong();
         long magic = raf.readLong();
         if(magic != 0x123456789ABCDEF0L){
+            raf.close(); // 关闭文件句柄
             throw new IOException("非法的SSTable文件: " + filePath);
         }
 
@@ -43,6 +53,8 @@ public class SSTableReader {
         raf.seek(bloomOffset); // 移动到布隆过滤器存储位置
         // 将RandomAccessFile包装成InputStream
         FileChannel channel = raf.getChannel();
+        // 重置channel的位置到布隆过滤器开始处
+        channel.position(bloomOffset);
         InputStream inputStream = Channels.newInputStream(channel);
         this.bloomFilter = BloomFilter.readFrom(inputStream, Funnels.stringFunnel(StandardCharsets.UTF_8));
 
@@ -69,12 +81,17 @@ public class SSTableReader {
     }
 
     public String get(String key) throws IOException {
+        if (bloomFilter == null || indexs.isEmpty()) {
+            return null;
+        }
+
         // 检查布隆过滤器
         if (!bloomFilter.mightContain(key)) {
             return null;
         }
 
         // 二分查找索引块，定位Data Block
+        // 注意：binarySearch的比较逻辑是基于lastKey的，所以它会找到第一个lastKey >= key的块
         int blockIndex = Collections.binarySearch(indexs, new IndexEntry(key, 0, 0));
         // blockIndex返回小于0的数表示找不到匹配项，通过公式可以得到key应该在的插入点
         if (blockIndex < 0) {
@@ -151,6 +168,7 @@ public class SSTableReader {
         return this.lastKey;
     }
 
+    @Override
     public void close() throws IOException {
         raf.close();
     }
@@ -171,6 +189,7 @@ public class SSTableReader {
 
         @Override
         public int compareTo(IndexEntry o) {
+            // 用lastKey进行比较，来定位key可能所在的块
             return this.lastKey.compareTo(o.lastKey);
         }
     }
