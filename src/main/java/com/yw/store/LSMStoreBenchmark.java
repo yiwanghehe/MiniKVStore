@@ -11,15 +11,15 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * A benchmark for testing the performance of LSMStore.
- * Measures Insertions Per Second (IPS) and Queries Per Second (QPS).
+ * 用于测试LSMStore性能的基准测试。
+ * 测量每秒插入数（IPS）和每秒查询数（QPS）。
  */
 public class LSMStoreBenchmark {
 
     // --- 配置 ---
     private static final String DATA_DIR = "./benchmark_data";
     private static final int NUM_THREADS = 10; // 并发线程数
-    private static final int OPERATIONS_PER_THREAD = 50000; // 每个线程执行的操作数
+    private static final int OPERATIONS_PER_THREAD = 100000; // 每个线程执行的操作数
     private static final int TOTAL_OPERATIONS = NUM_THREADS * OPERATIONS_PER_THREAD;
 
     public static void main(String[] args) throws Exception {

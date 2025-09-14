@@ -1,5 +1,6 @@
 package com.yw.store;
 
+import com.google.common.cache.Cache;
 import com.google.common.hash.BloomFilter;
 import com.google.common.hash.Funnels;
 import com.yw.store.entry.IndexEntry;
@@ -14,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 
 /**
  * 负责读取SSTable文件
@@ -26,8 +28,11 @@ public class SSTableReader implements AutoCloseable {
     private final String lastKey;
     private final long indexOffset; //索引块的起始偏移量
 
-    public SSTableReader(String filePath) throws IOException {
+    private final Cache<String, byte[]> blockCache; // 引入共享的数据块缓存
+
+    public SSTableReader(String filePath, Cache<String, byte[]> blockCache) throws IOException {
         this.filePath = filePath;
+        this.blockCache = blockCache;
         this.indexs = new ArrayList<>();
 
         try (RandomAccessFile tempRaf = new RandomAccessFile(filePath, "r")) {
@@ -98,10 +103,20 @@ public class SSTableReader implements AutoCloseable {
         IndexEntry entry = indexs.get(blockIndex);
         byte[] blockBytes;
 
-        try (RandomAccessFile raf = new RandomAccessFile(this.filePath, "r")) {
-            raf.seek(entry.getOffset());
-            blockBytes = new byte[entry.getSize()];
-            raf.readFully(blockBytes);
+        // 加入缓存机制
+        try {
+            String cacheKey = filePath + ":" + entry.getOffset();
+            blockBytes = blockCache.get(cacheKey, () -> {
+                try (RandomAccessFile raf = new RandomAccessFile(this.filePath, "r")) {
+                    raf.seek(entry.getOffset());
+                    byte[] _blockBytes = new byte[entry.getSize()];
+                    raf.readFully(_blockBytes);
+                    return _blockBytes;
+                }
+            });
+
+        } catch (ExecutionException e) {
+            throw new IOException("从缓存加载数据块失败", e);
         }
 
         ByteBuffer buffer = ByteBuffer.wrap(blockBytes);
@@ -135,6 +150,16 @@ public class SSTableReader implements AutoCloseable {
             byte[] keyBytes = new byte[keyLen];
             raf.readFully(keyBytes);
             return new String(keyBytes, StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * SSTable被删除时清理其在缓存中的数据
+     */
+    public void invalidateCache() {
+        for (IndexEntry entry : indexs) {
+            String cacheKey = filePath + ":" + entry.getOffset();
+            blockCache.invalidate(cacheKey);
         }
     }
 

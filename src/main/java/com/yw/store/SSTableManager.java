@@ -1,5 +1,7 @@
 package com.yw.store;
 
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.hash.BloomFilter;
 import com.google.common.hash.Funnels;
 import com.yw.node.Node;
@@ -33,9 +35,16 @@ public class SSTableManager {
     private final AtomicLong nextSSTableId = new AtomicLong(0); // 下一个SSTable文件的id
     private static final int L0_COMPACTION_THRESHOLD = 5; // L0文件数量触发合并时的阈值
 
+    private final Cache<String, byte[]> blockCache; // 共享的数据块缓存
+
     public SSTableManager(String dataDir) {
         this.sstDir = dataDir + "/sst";
         this.levels = new ConcurrentSkipListMap<>();
+
+        // 初始化LRU缓存
+        this.blockCache = CacheBuilder.newBuilder()
+                .maximumSize(1000000)
+                .build();
     }
 
     public void loadSSTables() throws IOException {
@@ -50,7 +59,7 @@ public class SSTableManager {
                             int level = Integer.parseInt(parts[0]);
                             long id = Long.parseLong(parts[1]);
                             nextSSTableId.set(Math.max(nextSSTableId.get(), id + 1));
-                            SSTableReader reader = new SSTableReader(path.toString());
+                            SSTableReader reader = new SSTableReader(path.toString(), blockCache);
                             levels.computeIfAbsent(level, k -> new ConcurrentSkipListMap<>())
                                     .put(fileName, reader);
                         } catch (Exception e) {
@@ -97,7 +106,7 @@ public class SSTableManager {
         String fileName = String.format("0-%d.sst", id);
         Path path = Paths.get(sstDir, fileName);
         SSTableWriter.write(memTable, path.toString());
-        SSTableReader reader = new SSTableReader(path.toString());
+        SSTableReader reader = new SSTableReader(path.toString(), blockCache);
         metadataLock.writeLock().lock();
         try {
             levels.computeIfAbsent(0, k -> new ConcurrentSkipListMap<>())
@@ -138,7 +147,7 @@ public class SSTableManager {
             boolean createdNewFile = mergeAndWriteStream(filesToCompact, newSstPath);
 
             if (createdNewFile) {
-                SSTableReader newReader = new SSTableReader(newSstPath.toString());
+                SSTableReader newReader = new SSTableReader(newSstPath.toString(), blockCache);
                 levels.computeIfAbsent(1, k -> new ConcurrentSkipListMap<>()).put(newSstFileName, newReader);
             }
 
@@ -153,6 +162,8 @@ public class SSTableManager {
             }
 
             for (SSTableReader reader : filesToCompact) {
+                // 从缓存中移除已失效SSTable的所有数据块
+                reader.invalidateCache();
                 Files.delete(Paths.get(reader.getFilePath()));
             }
 
