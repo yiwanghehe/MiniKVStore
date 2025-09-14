@@ -7,28 +7,22 @@ import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 
 /**
- * 用于Compaction过程，可以遍历一个SSTable中所有的键值对。
+ * 用于Compaction过程，可以遍历一个SSTable中所有的键值对，即遍历数据块。
  */
 public class SSTableIterator {
     private final RandomAccessFile raf;
-    private final long fileEndOffset; // 数据块的终点
+    private final long dataEndOffset; //数据块的终点
     private long currentOffset;
 
     public SSTableIterator(SSTableReader reader) throws IOException {
         this.raf = new RandomAccessFile(reader.getFilePath(), "r");
         this.currentOffset = 0;
-
-        // 检查SSTable是否为空。如果索引为空，则没有数据块可迭代。
-        if (reader.indexs.isEmpty()){
-            this.fileEndOffset = 0; // 没有数据，迭代范围为0
-        } else {
-            // 如果不为空，迭代的终点就是索引块的起始位置。
-            this.fileEndOffset = reader.getIndexOffset();
-        }
+        this.dataEndOffset = reader.getIndexOffset();
     }
 
     public boolean hasNext() {
-        return currentOffset < fileEndOffset;
+        // 当索引偏移量为0时，意味着文件为空或只有footer，没有数据块
+        return dataEndOffset > 0 && currentOffset < dataEndOffset;
     }
 
     public Node<String, String> next() throws IOException {
@@ -52,5 +46,4 @@ public class SSTableIterator {
     public void close() throws IOException {
         raf.close();
     }
-
 }

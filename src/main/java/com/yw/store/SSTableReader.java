@@ -2,6 +2,7 @@ package com.yw.store;
 
 import com.google.common.hash.BloomFilter;
 import com.google.common.hash.Funnels;
+import com.yw.store.entry.IndexEntry;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -15,8 +16,7 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * 负责读取SSTable文件。
- * (V4: 缓存indexOffset元数据以供Iterator使用)
+ * 负责读取SSTable文件
  */
 public class SSTableReader implements AutoCloseable {
     private final String filePath;
@@ -24,13 +24,12 @@ public class SSTableReader implements AutoCloseable {
     private final BloomFilter<String> bloomFilter;
     private final String firstKey;
     private final String lastKey;
-    private final long indexOffset; // 新增：缓存索引块的起始偏移量
+    private final long indexOffset; //索引块的起始偏移量
 
     public SSTableReader(String filePath) throws IOException {
         this.filePath = filePath;
         this.indexs = new ArrayList<>();
 
-        // 使用 try-with-resources 确保文件句柄在构造函数中被正确关闭
         try (RandomAccessFile tempRaf = new RandomAccessFile(filePath, "r")) {
             // 文件长度不足以容纳Footer，说明是空文件或非法文件
             if (tempRaf.length() < 24) {
@@ -45,7 +44,7 @@ public class SSTableReader implements AutoCloseable {
             long fileLength = tempRaf.length();
             tempRaf.seek(fileLength - 24); // Footer size = 8B index_offset, 8B bloom_offset, 8B magic_number
             long indexOffsetValue = tempRaf.readLong();
-            this.indexOffset = indexOffsetValue; // 缓存索引块偏移量
+            this.indexOffset = indexOffsetValue;
             long bloomOffset = tempRaf.readLong();
             long magic = tempRaf.readLong();
             if (magic != 0x123456789ABCDEF0L) {
@@ -53,7 +52,7 @@ public class SSTableReader implements AutoCloseable {
             }
 
             // 读取布隆过滤器
-            tempRaf.seek(bloomOffset); // 移动到布隆过滤器存储位置
+            tempRaf.seek(bloomOffset);
             FileChannel channel = tempRaf.getChannel();
             channel.position(bloomOffset);
             InputStream inputStream = Channels.newInputStream(channel);
@@ -71,9 +70,9 @@ public class SSTableReader implements AutoCloseable {
                 indexs.add(new IndexEntry(new String(keyBytes, StandardCharsets.UTF_8), offset, size));
             }
 
-            // 获取第一个和最后一个key
+            // 获得firstKey和lastKey
             if (!indexs.isEmpty()) {
-                this.lastKey = indexs.get(indexs.size() - 1).lastKey;
+                this.lastKey = indexs.get(indexs.size() - 1).getLastKey();
                 this.firstKey = readFirstKey();
             } else {
                 this.firstKey = null;
@@ -82,15 +81,12 @@ public class SSTableReader implements AutoCloseable {
         }
     }
 
-    // 移除了 synchronized，现在可以被多线程安全地并发调用
     public String get(String key) throws IOException {
-        if (bloomFilter == null || indexs.isEmpty()) {
-            return null;
-        }
-        if (!bloomFilter.mightContain(key)) {
+        if (bloomFilter == null || !bloomFilter.mightContain(key)) {
             return null;
         }
 
+        // 二分查找
         int blockIndex = Collections.binarySearch(indexs, new IndexEntry(key, 0, 0));
         if (blockIndex < 0) {
             blockIndex = -blockIndex - 1;
@@ -102,10 +98,9 @@ public class SSTableReader implements AutoCloseable {
         IndexEntry entry = indexs.get(blockIndex);
         byte[] blockBytes;
 
-        // 为本次读操作创建独立的、短暂的文件句柄
         try (RandomAccessFile raf = new RandomAccessFile(this.filePath, "r")) {
-            raf.seek(entry.offset);
-            blockBytes = new byte[entry.size];
+            raf.seek(entry.getOffset());
+            blockBytes = new byte[entry.getSize()];
             raf.readFully(blockBytes);
         }
 
@@ -134,7 +129,6 @@ public class SSTableReader implements AutoCloseable {
     }
 
     private String readFirstKey() throws IOException {
-        // 同样使用独立的句柄来读取
         try (RandomAccessFile raf = new RandomAccessFile(this.filePath, "r")) {
             raf.seek(0);
             int keyLen = raf.readInt();
@@ -144,47 +138,17 @@ public class SSTableReader implements AutoCloseable {
         }
     }
 
-    public String getFilePath() {
-        return this.filePath;
-    }
-
-    public String getFirstKey() {
-        return this.firstKey;
-    }
-
-    public String getLastKey() {
-        return this.lastKey;
-    }
-
-    // 新增：为Iterator提供元数据
-    public long getIndexOffset() {
-        return this.indexOffset;
-    }
+    public String getFilePath() { return this.filePath; }
+    public String getFirstKey() { return this.firstKey; }
+    public String getLastKey() { return this.lastKey; }
+    public long getIndexOffset() { return this.indexOffset; }
 
     @Override
-    public void close() {
-        // 因为没有共享的raf实例，所以这里什么都不用做
-    }
+    public void close() {}
 
     public SSTableIterator iterator() throws IOException {
-        // SSTableIterator 在内部会创建自己的 RandomAccessFile，所以它是安全的
         return new SSTableIterator(this);
     }
 
-    // 内部类，保持不变
-    static class IndexEntry implements Comparable<IndexEntry> {
-        String lastKey;
-        long offset;
-        int size;
-        IndexEntry(String lastKey, long offset, int size) {
-            this.lastKey = lastKey;
-            this.offset = offset;
-            this.size = size;
-        }
-        @Override
-        public int compareTo(IndexEntry o) {
-            return this.lastKey.compareTo(o.lastKey);
-        }
-    }
 }
 

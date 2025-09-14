@@ -24,7 +24,7 @@ public class LSMStore implements AutoCloseable {
 
     // --- 配置与状态 ---
     public static final String TOMBSTONE = "!!__TOMBSTONE__!!"; // 删除标记(墓碑)
-    private static final String DATA_DIR = "./data"; // 数据存储目录
+    private static final String DEFAULT_DATA_DIR = "./data"; // 默认数据存储目录
     private static final long MEMTABLE_THRESHOLD = 4 * 1024 * 1024; // MemTable切换阈值 (4MB)
     private final ReadWriteLock memtableSwitchLock = new ReentrantReadWriteLock(); // MemTable切换锁
     private volatile boolean shuttingDown = false; // 关闭的状态标志
@@ -33,15 +33,23 @@ public class LSMStore implements AutoCloseable {
     private final ExecutorService flushExecutor; // 用于执行刷盘任务的单线程执行器
 
     /**
+     * 构造函数，初始化LSM存储引擎在默认目录。
+     * @throws IOException 初始化过程中发生IO错误
+     */
+    public LSMStore() throws IOException {
+        this(DEFAULT_DATA_DIR);
+    }
+
+    /**
      * 构造函数，初始化LSM存储引擎。
      *
      * @throws IOException 初始化过程中发生IO错误
      */
-    public LSMStore() throws IOException {
+    public LSMStore(String dataDir) throws IOException {
         this.activeMemTable = new SkipList<>();
         this.immutableMemTables = new ConcurrentLinkedQueue<>();
-        this.walManager = new WALManager<>(DATA_DIR);
-        this.sstManager = new SSTableManager(DATA_DIR);
+        this.walManager = new WALManager<>(dataDir);
+        this.sstManager = new SSTableManager(dataDir);
 
         // 恢复未完成刷盘的MemTable
         recoverFromWAL();
@@ -71,30 +79,27 @@ public class LSMStore implements AutoCloseable {
         if (shuttingDown) throw new IllegalStateException("存储引擎正在关闭，无法接受新的写入。");
         if (key == null || value == null) throw new IllegalArgumentException("Key和Value不能为空");
 
-        memtableSwitchLock.readLock().lock();
-        try {
-            // 先写入WAL日志，保证数据不丢失
-            walManager.logPut(key, value);
-            // 写入MemTable
-            activeMemTable.insert(key, value);
-            if (activeMemTable.getApproximateSize() >= MEMTABLE_THRESHOLD) {
-                // 升级读锁为写锁前，必须先释放读锁
-                memtableSwitchLock.readLock().unlock();
-                memtableSwitchLock.writeLock().lock();
-                try {
-                    // 双重检查，防止在等待写锁时其他线程已经完成了切换
-                    // 检查是否切换MemTable
-                    if (activeMemTable.getApproximateSize() >= MEMTABLE_THRESHOLD) {
-                        switchMemTable();
-                    }
-                } finally {
-                    // 降级写锁为读锁
-                    memtableSwitchLock.readLock().lock();
-                    memtableSwitchLock.writeLock().unlock();
+        // 获取当前活跃的MemTable引用
+        SkipList<String, String> currentMemTable = activeMemTable;
+
+        // 先写入WAL日志
+        walManager.logPut(key, value);
+        // 再写入MemTable (SkipList内部是线程安全的)
+        currentMemTable.insert(key, value);
+
+        // 检查是否需要切换MemTable，无锁检查
+        if (currentMemTable.getApproximateSize() >= MEMTABLE_THRESHOLD) {
+            // 仅在需要切换时才加写锁
+            memtableSwitchLock.writeLock().lock();
+            try {
+                // 双重检查：只有当activeMemTable还是我们之前操作的那个时，才进行切换
+                // 防止多个线程检测到阈值后重复切换
+                if (currentMemTable == activeMemTable) {
+                    switchMemTable();
                 }
+            } finally {
+                memtableSwitchLock.writeLock().unlock();
             }
-        } finally {
-            memtableSwitchLock.readLock().unlock();
         }
     }
 
@@ -107,10 +112,9 @@ public class LSMStore implements AutoCloseable {
 
     /**
      * 切换MemTable，将当前活跃的MemTable变为不可变，并创建一个新的空MemTable。
+     * 这个方法必须在持有写锁的情况下被调用
      */
     private void switchMemTable() throws IOException {
-        // 这个方法必须在持有写锁的情况下被调用
-
         // 防止并发切换
         if (activeMemTable.getNodeCount() == 0) return;
         // 将当前的MemTable放入不可变队列，等待刷盘
@@ -134,12 +138,13 @@ public class LSMStore implements AutoCloseable {
         String value;
 
         // 先从活跃的MemTable中查找
-        memtableSwitchLock.readLock().lock();
-        try {
-            value = activeMemTable.get(key);
-        } finally {
-            memtableSwitchLock.readLock().unlock();
-        }
+//        memtableSwitchLock.readLock().lock();
+//        try {
+//            value = activeMemTable.get(key);
+//        } finally {
+//            memtableSwitchLock.readLock().unlock();
+//        }
+        value = activeMemTable.get(key);
         if (value != null) return value.equals(TOMBSTONE) ? null : value;
 
         // 再从不可变的immutableMemTableQueue中查找(从新到旧)
@@ -197,7 +202,7 @@ public class LSMStore implements AutoCloseable {
         System.out.println("正在关闭存储引擎...");
         // 设置关闭标志，并拒绝新的写入
         shuttingDown = true;
-        compactionManager.shutdown();
+//        compactionManager.shutdown();
         // 切换最后的activeMemTable
         memtableSwitchLock.writeLock().lock();
         try {
@@ -212,13 +217,17 @@ public class LSMStore implements AutoCloseable {
 
         // 停止接受新任务，并等待现有任务刷盘完成
         flushExecutor.shutdown();
-        if (!flushExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-            System.err.println("后台刷盘任务在10秒内未能完成！");
+        int timeout = 60;
+        if (!flushExecutor.awaitTermination(timeout, TimeUnit.SECONDS)) {
+            System.err.println("后台刷盘任务在" + timeout + "秒内未能完成！");
         }
+
+        // 设置再刷盘任务之后关闭，确保有机会对最后刷盘的任务进行合并
+        compactionManager.shutdown();
+        compactionManager.join(TimeUnit.SECONDS.toMillis(timeout));
 
         // 在关闭WAL之前，先关闭所有SSTable文件句柄
         sstManager.close();
-
         // 所有内存数据都刷盘后或超时后，才关闭WAL
         walManager.close();
         System.out.println("存储引擎已关闭。");
