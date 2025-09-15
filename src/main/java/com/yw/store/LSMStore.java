@@ -1,5 +1,7 @@
 package com.yw.store;
 
+import com.yw.node.Node;
+import com.yw.pool.NodePool;
 import com.yw.skipList.SkipList;
 
 import java.io.IOException;
@@ -16,6 +18,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  */
 public class LSMStore implements AutoCloseable {
     // --- 核心组件 ---
+    private final NodePool<String, String> nodePool; // 引入SkipList里节点的对象池
     private volatile SkipList<String, String> activeMemTable; // 当前活跃的可写内存表
     private final ConcurrentLinkedQueue<SkipList<String, String>> immutableMemTables; // 只读的、等待刷盘的内存表队列
     private final WALManager<String, String> walManager; // 预写日志管理器
@@ -46,7 +49,8 @@ public class LSMStore implements AutoCloseable {
      * @throws IOException 初始化过程中发生IO错误
      */
     public LSMStore(String dataDir) throws IOException {
-        this.activeMemTable = new SkipList<>();
+        this.nodePool = new NodePool<>();
+        this.activeMemTable = new SkipList<>(nodePool);
         this.immutableMemTables = new ConcurrentLinkedQueue<>();
         this.walManager = new WALManager<>(dataDir);
         this.sstManager = new SSTableManager(dataDir);
@@ -120,7 +124,7 @@ public class LSMStore implements AutoCloseable {
         // 将当前的MemTable放入不可变队列，等待刷盘
         immutableMemTables.add(activeMemTable);
         // 新初始化一个MemTable
-        activeMemTable = new SkipList<>();
+        activeMemTable = new SkipList<>(nodePool);
         // 轮转日志
         walManager.rotateLog();
     }
@@ -137,13 +141,6 @@ public class LSMStore implements AutoCloseable {
 
         String value;
 
-        // 先从活跃的MemTable中查找
-//        memtableSwitchLock.readLock().lock();
-//        try {
-//            value = activeMemTable.get(key);
-//        } finally {
-//            memtableSwitchLock.readLock().unlock();
-//        }
         value = activeMemTable.get(key);
         if (value != null) return value.equals(TOMBSTONE) ? null : value;
 
@@ -167,6 +164,16 @@ public class LSMStore implements AutoCloseable {
             if (memTableToFlush != null) {
                 try {
                     sstManager.flushMemTableToSSTable(memTableToFlush);
+
+                    // 将节点归还至对象池
+                    Node<String, String> current = memTableToFlush.getHeader().getForwards().get(0);
+                    while(current != null) {
+                        // 必须先获取下一个节点的引用，再释放当前节点
+                        Node<String, String> next = current.getForwards().get(0);
+                        nodePool.release(current);
+                        current = next;
+                    }
+
                 } catch (IOException e) {
                     System.err.println("刷盘失败: " + e.getMessage());
                     // 实际应用中需要有重试或错误处理机制
@@ -202,14 +209,13 @@ public class LSMStore implements AutoCloseable {
         System.out.println("正在关闭存储引擎...");
         // 设置关闭标志，并拒绝新的写入
         shuttingDown = true;
-//        compactionManager.shutdown();
         // 切换最后的activeMemTable
         memtableSwitchLock.writeLock().lock();
         try {
             // 将最后的 activeMemTable(如果非空)也加入待刷盘队列
             if (activeMemTable.getNodeCount() > 0) {
                 immutableMemTables.add(activeMemTable);
-                activeMemTable = new SkipList<>();
+                activeMemTable = new SkipList<>(nodePool);
             }
         } finally {
             memtableSwitchLock.writeLock().unlock();

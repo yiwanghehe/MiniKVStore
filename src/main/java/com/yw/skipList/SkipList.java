@@ -1,6 +1,7 @@
 package com.yw.skipList;
 
 import com.yw.node.Node;
+import com.yw.pool.NodePool;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -42,13 +43,19 @@ public class SkipList<K extends Comparable<K>, V> {
     private final AtomicLong approximateSize;
 
     /**
+     * 对象池引用
+     */
+    private final NodePool<K, V> nodePool;
+
+    /**
      * 构造方法
      */
-    public SkipList() {
+    public SkipList(NodePool<K, V> nodePool) {
         this.header = new Node<>(null, null, MAX_LEVEL);
         this.skipListLevel = new AtomicInteger(0);
         this.nodeCount = new AtomicLong(0L);
         this.approximateSize = new AtomicLong(0L);
+        this.nodePool = nodePool;
     }
 
     /**
@@ -60,7 +67,7 @@ public class SkipList<K extends Comparable<K>, V> {
      * @return 返回创建后的该节点
      */
     public Node<K, V> createNode(K key, V value, Integer level) {
-        return new Node<>(key, value, level);
+        return nodePool.acquire(key, value, level); // 从对象池中获取，而且不是直接new
     }
 
     /**

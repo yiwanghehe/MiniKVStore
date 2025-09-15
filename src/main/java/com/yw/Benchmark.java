@@ -1,6 +1,7 @@
 package com.yw;
 
 import com.yw.ConcurrentSkipListMap.ConcurrentSkipListMapKVStore;
+import com.yw.pool.NodePool;
 import com.yw.skipList.SkipList;
 
 import java.util.concurrent.ThreadLocalRandom;
@@ -93,7 +94,7 @@ public class Benchmark {
 
         // --- 对自定义 SkipList 进行基准测试 ---
         System.out.println("正在测试自定义 SkipList (使用读写锁)...");
-        SkipList<String, String> customSkipList = new SkipList<>();
+        SkipList<String, String> customSkipList = new SkipList<>(new NodePool<String, String>());
         runBenchmark(customSkipList, "自定义 SkipList");
         System.out.println("---------------------------------------------------");
 

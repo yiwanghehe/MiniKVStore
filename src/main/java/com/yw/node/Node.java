@@ -22,6 +22,32 @@ public class Node<K extends Comparable<K>, V> {
         this.forwards = new ArrayList<>(Collections.nCopies(level + 1, null));
     }
 
+    /**
+     * 重置节点状态以供对象池复用。
+     * @param key 新的键
+     * @param value 新的值
+     * @param level 新的层级
+     */
+    public void reset(K key, V value, int level) {
+        this.key = key;
+        this.value = value;
+        this.level = level;
+
+        // 调整forwards的大小以匹配新的层级
+        int requiredSize = level + 1;
+        while (this.forwards.size() < requiredSize) {
+            this.forwards.add(null);
+        }
+        while (this.forwards.size() > requiredSize) {
+            this.forwards.remove(this.forwards.size() - 1);
+        }
+
+        // 确保所有指针都被清空
+        for (int i = 0; i < requiredSize; i++) {
+            this.forwards.set(i, null);
+        }
+    }
+
     public K getKey() {
         return this.key;
     }
