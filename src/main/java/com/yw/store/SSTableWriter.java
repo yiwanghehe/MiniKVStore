@@ -1,7 +1,6 @@
 package com.yw.store;
 
-import com.google.common.hash.BloomFilter;
-import com.google.common.hash.Funnels;
+import com.yw.bloomfilter.MyBloomFilter;
 import com.yw.node.Node;
 import com.yw.skipList.SkipList;
 import com.yw.store.entry.IndexEntry;
@@ -25,8 +24,7 @@ public class SSTableWriter {
              DataOutputStream dos = new DataOutputStream(fos)) {
 
             List<IndexEntry> indexs = new ArrayList<>();
-            BloomFilter<String> bloomFilter = BloomFilter.create(
-                    Funnels.stringFunnel(StandardCharsets.UTF_8),
+            MyBloomFilter bloomFilter = MyBloomFilter.create(
                     memTable.getNodeCount(),
                     0.01 // 1%误判率
             );
@@ -83,6 +81,4 @@ public class SSTableWriter {
             dos.writeLong(MAGIC_NUMBER);
         }
     }
-
 }
-

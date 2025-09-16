@@ -1,8 +1,7 @@
 package com.yw.store;
 
 import com.google.common.cache.Cache;
-import com.google.common.hash.BloomFilter;
-import com.google.common.hash.Funnels;
+import com.yw.bloomfilter.MyBloomFilter;
 import com.yw.store.entry.IndexEntry;
 
 import java.io.IOException;
@@ -23,7 +22,7 @@ import java.util.concurrent.ExecutionException;
 public class SSTableReader implements AutoCloseable {
     private final String filePath;
     final List<IndexEntry> indexs;
-    private final BloomFilter<String> bloomFilter;
+    private final MyBloomFilter bloomFilter;
     private final String firstKey;
     private final String lastKey;
     private final long indexOffset; //索引块的起始偏移量
@@ -61,7 +60,7 @@ public class SSTableReader implements AutoCloseable {
             FileChannel channel = tempRaf.getChannel();
             channel.position(bloomOffset);
             InputStream inputStream = Channels.newInputStream(channel);
-            this.bloomFilter = BloomFilter.readFrom(inputStream, Funnels.stringFunnel(StandardCharsets.UTF_8));
+            this.bloomFilter = MyBloomFilter.readFrom(inputStream);
 
             // 读取索引块
             tempRaf.seek(indexOffsetValue);

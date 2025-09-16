@@ -2,8 +2,7 @@ package com.yw.store;
 
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
-import com.google.common.hash.BloomFilter;
-import com.google.common.hash.Funnels;
+import com.yw.bloomfilter.MyBloomFilter;
 import com.yw.node.Node;
 import com.yw.skipList.SkipList;
 import com.yw.store.entry.IndexEntry;
@@ -194,7 +193,7 @@ public class SSTableManager {
             }
 
             List<IndexEntry> indexs = new ArrayList<>();
-            BloomFilter<String> bloomFilter = BloomFilter.create(Funnels.stringFunnel(StandardCharsets.UTF_8), 1_000_000, 0.01);
+            MyBloomFilter bloomFilter = MyBloomFilter.create(1_000_000, 0.01);
             long entriesInSSTable = 0;
             String lastKey = null;
 

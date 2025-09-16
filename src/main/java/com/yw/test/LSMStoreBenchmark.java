@@ -1,4 +1,6 @@
-package com.yw.store;
+package com.yw.test;
+
+import com.yw.store.LSMStore;
 
 import java.io.IOException;
 import java.nio.file.Files;
